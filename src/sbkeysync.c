@@ -889,10 +889,12 @@ int main(int argc, char **argv)
 {
 	bool use_default_keystore_dirs;
 	struct sync_context *ctx;
+	int rc;
 
 	use_default_keystore_dirs = true;
 	ctx = talloc_zero(NULL, struct sync_context);
 	list_head_init(&ctx->new_keys);
+	rc = EXIT_SUCCESS;
 
 	for (;;) {
 		int idx, c;
@@ -985,10 +987,10 @@ int main(int argc, char **argv)
 	if (ctx->verbose)
 		print_new_keys(ctx);
 
-	if (!ctx->dry_run)
-		insert_new_keys(ctx);
+	if (!ctx->dry_run && insert_new_keys(ctx))
+		rc = EXIT_FAILURE;
 
 	talloc_free(ctx);
 
-	return EXIT_SUCCESS;
+	return rc;
 }

@@ -72,6 +72,7 @@ static struct option options[] = {
 	{ "output", required_argument, NULL, 'o' },
 	{ "cert", required_argument, NULL, 'c' },
 	{ "key", required_argument, NULL, 'k' },
+	{ "keyform", required_argument, NULL, 'f' },
 	{ "detached", no_argument, NULL, 'd' },
 	{ "verbose", no_argument, NULL, 'v' },
 	{ "help", no_argument, NULL, 'h' },
@@ -90,6 +91,7 @@ static void usage(void)
 		"\t--engine <eng>     use the specified engine to load the key\n"
 		"\t--key <keyfile>    signing key (PEM-encoded RSA "
 						"private key)\n"
+		"\t--keyform <PEM|ENGINE>  specify the form of the key  in keyfile\n"
 		"\t--cert <certfile>  certificate (x509 certificate)\n"
 		"\t--addcert <addcertfile> additional intermediate certificates in a file\n"
 		"\t--detached         write a detached signature, instead of\n"
@@ -152,22 +154,30 @@ static int add_intermediate_certs(PKCS7 *p7, const char *filename)
 
 int main(int argc, char **argv)
 {
-	const char *keyfilename, *certfilename, *addcertfilename, *engine;
+	const char *keyfilename, *certfilename, *addcertfilename, *engine, *keyformname;
 	struct sign_context *ctx;
 	uint8_t *buf, *tmp;
 	int rc, c, sigsize;
 	EVP_PKEY *pkey;
+	uint8_t keyform;
+	ENGINE *e;
+	UI_METHOD *ui;
+	int ret = EXIT_SUCCESS;
 
 	ctx = talloc_zero(NULL, struct sign_context);
 
 	keyfilename = NULL;
 	certfilename = NULL;
 	addcertfilename = NULL;
+	keyformname = NULL;
 	engine = NULL;
+	keyform = KEYFORM_PEM;
+	e = NULL;
+	ui = NULL;
 
 	for (;;) {
 		int idx;
-		c = getopt_long(argc, argv, "o:c:k:dvVhe:a:", options, &idx);
+		c = getopt_long(argc, argv, "o:c:k:f:dvVhe:a:", options, &idx);
 		if (c == -1)
 			break;
 
@@ -180,6 +190,9 @@ int main(int argc, char **argv)
 			break;
 		case 'k':
 			keyfilename = optarg;
+			break;
+		case 'f':
+			keyformname = optarg;
 			break;
 		case 'd':
 			ctx->detached = 1;
@@ -204,7 +217,8 @@ int main(int argc, char **argv)
 
 	if (argc != optind + 1) {
 		usage();
-		return EXIT_FAILURE;
+		ret = EXIT_FAILURE;
+		goto finish_exit;
 	}
 
 	ctx->infilename = argv[optind];
@@ -215,18 +229,44 @@ int main(int argc, char **argv)
 		fprintf(stderr,
 			"error: No certificate specified (with --cert)\n");
 		usage();
-		return EXIT_FAILURE;
+		ret = EXIT_FAILURE;
+		goto finish_exit;
 	}
 	if (!keyfilename) {
 		fprintf(stderr,
 			"error: No key specified (with --key)\n");
 		usage();
-		return EXIT_FAILURE;
+		ret = EXIT_FAILURE;
+		goto finish_exit;
+	}
+
+ 	if (keyformname != NULL) {
+		if (strcmp(keyformname, "PEM") == 0) {
+			keyform = KEYFORM_PEM;
+		} else if (strcmp(keyformname, "ENGINE") == 0) {
+			if (!engine) {
+				fprintf(stderr,
+					"error: Specified keyform as engine but no engine specified\n");
+				usage();
+				ret = EXIT_FAILURE;
+				goto finish_exit;
+			}
+
+			keyform = KEYFORM_ENGINE;
+		} else {
+			fprintf(stderr,
+				"error: Unrecognized keyform, use PEM or ENGINE\n");
+			usage();
+			ret = EXIT_FAILURE;
+			goto finish_exit;
+		}
 	}
 
 	ctx->image = image_load(ctx->infilename);
-	if (!ctx->image)
-		return EXIT_FAILURE;
+	if (!ctx->image) {
+		ret = EXIT_FAILURE;
+		goto finish_exit;
+	}
 
 	talloc_steal(ctx, ctx->image);
 
@@ -244,16 +284,28 @@ int main(int argc, char **argv)
 	 * module isn't present).  In either case ignore the errors
 	 * (malloc will cause other failures out lower down */
 	ERR_clear_error();
-	if (engine)
-		pkey = fileio_read_engine_key(engine, keyfilename);
-	else
+	if (engine) {
+		e = setup_engine(engine, ui);
+		if (!e){
+			ret = EXIT_FAILURE;
+			goto finish_exit;
+		}
+
+		pkey = fileio_read_engine_key(e, keyfilename, keyform, ui);
+	} else {
 		pkey = fileio_read_pkey(keyfilename);
-	if (!pkey)
-		return EXIT_FAILURE;
+	}
+
+	if (!pkey){
+		ret = EXIT_FAILURE;
+		goto finish_exit;
+	}
 
 	X509 *cert = fileio_read_cert(certfilename);
-	if (!cert)
-		return EXIT_FAILURE;
+	if (!cert){
+		ret = EXIT_FAILURE;
+		goto finish_exit;
+	}
 
 	const EVP_MD *md = EVP_get_digestbyname("SHA256");
 
@@ -266,17 +318,22 @@ int main(int argc, char **argv)
 	if (!si) {
 		fprintf(stderr, "error in key/certificate chain\n");
 		ERR_print_errors_fp(stderr);
-		return EXIT_FAILURE;
+		ret = EXIT_FAILURE;
+		goto finish_exit;
 	}
 
 	PKCS7_content_new(p7, NID_pkcs7_data);
 
 	rc = IDC_set(p7, si, ctx->image);
-	if (rc)
-		return EXIT_FAILURE;
+	if (rc) {
+		ret = EXIT_FAILURE;
+		goto finish_exit;
+	}
 
-	if (addcertfilename && add_intermediate_certs(p7, addcertfilename))
-		return EXIT_FAILURE;
+	if (addcertfilename && add_intermediate_certs(p7, addcertfilename)) {
+		ret = EXIT_FAILURE;
+		goto finish_exit;
+	}
 
 	sigsize = i2d_PKCS7(p7, NULL);
 	tmp = buf = talloc_array(ctx->image, uint8_t, sigsize);
@@ -293,11 +350,17 @@ int main(int argc, char **argv)
 		for (i = 0; !image_get_signature(ctx->image, i, &buf, &len); i++)
 			;
 		image_write_detached(ctx->image, i - 1, ctx->outfilename);
-	} else
+	} else {
 		image_write(ctx->image, ctx->outfilename);
+	}
 
-	talloc_free(ctx);
+finish_exit:
+	if(ctx != NULL) talloc_free(ctx);
+	if (e != NULL) {
+		ENGINE_finish(e);
+		ENGINE_free(e);
+	}
 
-	return EXIT_SUCCESS;
+	return ret;
 }
 

@@ -4,6 +4,10 @@ bin_PROGRAMS = sbsign sbverify sbattach sbvarsign sbsiglist sbkeysync
 coff_headers = coff/external.h coff/pe.h
 AM_CFLAGS = -Wall -Wextra --std=gnu99
 
+if HAVE_OPENSSL3
+AM_CFLAGS += -DOPENSSL_API_COMPAT=0x10100000L
+endif
+
 common_SOURCES = idc.c idc.h image.c image.h fileio.c fileio.h \
 	efivars.h $(coff_headers)
 common_LDADD = ../lib/ccan/libccan.a $(libcrypto_LIBS)
