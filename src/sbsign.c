@@ -173,6 +173,7 @@ int main(int argc, char **argv)
 	keyform = KEYFORM_PEM;
 	e = NULL;
 	ui = NULL;
+	keyformname = NULL;
 
 	for (;;) {
 		int idx;
