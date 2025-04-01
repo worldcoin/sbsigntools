@@ -1,0 +1,100 @@
+name: Build sbsign
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: [ amd64, arm64 ]
+
+    steps:
+      - uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # pin@v3
+
+      - name: Set up cross-compilation for ARM64
+        if: matrix.platform == 'arm64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autogen autoconf libtool pkg-config
+          sudo apt-get install -y libssl-dev uuid-dev gnu-efi binutils-dev help2man
+
+      - name: Configure and build (amd64)
+        if: matrix.platform == 'amd64'
+        run: |
+          ./autogen.sh
+          ./configure
+          make
+
+      - name: Configure and build (arm64)
+        if: matrix.platform == 'arm64'
+        run: |
+          ./autogen.sh
+          ./configure --host=aarch64-linux-gnu
+          make
+
+      - name: Create directory for artifacts
+        run: mkdir -p dist
+
+      - name: Copy and strip binary
+        run: |
+          cp src/sbsign dist/sbsign-${{ matrix.platform }}
+          strip dist/sbsign-${{ matrix.platform }}
+
+      - name: Package binary
+        run: |
+          cd dist
+          tar -czvf sbsign-${{ matrix.platform }}.tar.gz sbsign-${{ matrix.platform }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5 # pin@v3
+        with:
+          name: sbsign-${{ matrix.platform }}
+          path: dist/sbsign-${{ matrix.platform }}.tar.gz
+
+      # Store version for release
+      - name: Store version info
+        if: matrix.platform == 'amd64'
+        id: version
+        run: |
+          VERSION=$(./src/sbsign --version | grep -oP '(?<=sbsigntool version )[0-9.]+' || echo "0.0.0")
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@9bc31d5ccc31df68ecc42ccf4149144866c47d8a # pin@v3
+        with:
+          path: artifacts
+
+      - name: Prepare artifacts for release
+        run: |
+          mkdir -p release
+          find artifacts -name "*.tar.gz" -exec cp {} release/ \;
+
+      - name: Upload binaries to release
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # pin@v1
+        with:
+          files: |
+            release/sbsign-amd64.tar.gz
+            release/sbsign-arm64.tar.gz
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
