@@ -440,6 +440,8 @@ int main(int argc, char **argv)
 {
 	const char *guid_str, *attr_str, *varname, *engine;
 	const char *keyfilename, *certfilename;
+	ENGINE *e;
+	UI_METHOD *ui;
 	struct varsign_context *ctx;
 	bool include_attrs;
 	int c;
@@ -452,6 +454,8 @@ int main(int argc, char **argv)
 	guid_str = NULL;
 	attr_str= NULL;
 	include_attrs = false;
+	e = NULL;
+	ui = NULL;
 
 	for (;;) {
 		int idx;
@@ -551,10 +555,16 @@ int main(int argc, char **argv)
 	if (fileio_read_file(ctx, ctx->infilename, &ctx->data, &ctx->data_len))
 		return EXIT_FAILURE;
 
-	if (engine)
-		ctx->key = fileio_read_engine_key(engine, keyfilename);
-	else
+	if (engine) {
+		e = setup_engine(engine, ui);
+		if (!e)
+			return EXIT_FAILURE;
+
+		ctx->key = fileio_read_engine_key(e, keyfilename, KEYFORM_PEM, ui);
+	} else{
 		ctx->key = fileio_read_pkey(keyfilename);
+	}
+
 	if (!ctx->key)
 		return EXIT_FAILURE;
 
@@ -569,6 +579,11 @@ int main(int argc, char **argv)
 	/* write the resulting image */
 	if (write_signed(ctx, include_attrs))
 		return EXIT_FAILURE;
+
+	if (e) {
+		ENGINE_finish(e);
+		ENGINE_free(e);
+	}
 
 	return EXIT_SUCCESS;
 }
