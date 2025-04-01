@@ -17,25 +17,72 @@ jobs:
         include:
           - platform: amd64
             runs-on: ubuntu-latest
+            display-name: 'x86_64 Build'
           - platform: arm64
-            runs-on: ubuntu-latest-arm64
-
+            runs-on: ubuntu-24.04-arm
+            display-name: 'ARM64 Build'
+      fail-fast: false
     runs-on: ${{ matrix.runs-on }}
+    name: ${{ matrix.display-name }}
 
     steps:
-      - uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # pin@v3
+      - name: Checkout code
+        uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # pin@v3
+        with:
+          fetch-depth: 0
+
+      - name: Setup Build Cache
+        uses: actions/cache@2f8e54208210a422b2efd51efaa6bd6d7ca8920f # pin@v3
+        with:
+          path: |
+            ./.build
+            ./src/.libs
+          key: ${{ runner.os }}-${{ matrix.platform }}-${{ hashFiles('**/*.c', '**/*.h', 'configure.ac') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.platform }}-
 
       - name: Install dependencies
+        id: deps
         run: |
+          echo "::group::Installing Dependencies"
+          start_time=$(date +%s)
           sudo apt-get update
           sudo apt-get install -y build-essential autogen autoconf libtool pkg-config
           sudo apt-get install -y libssl-dev uuid-dev gnu-efi binutils-dev help2man
+          end_time=$(date +%s)
+          echo "::endgroup::"
+          echo "duration=$((end_time-start_time))" >> $GITHUB_OUTPUT
 
-      - name: Configure and build
+      - name: Configure
+        id: configure
         run: |
+          echo "::group::Configure"
+          start_time=$(date +%s)
           ./autogen.sh
           ./configure
-          make
+          end_time=$(date +%s)
+          echo "::endgroup::"
+          echo "duration=$((end_time-start_time))" >> $GITHUB_OUTPUT
+
+      - name: Build
+        id: build
+        run: |
+          echo "::group::Build"
+          start_time=$(date +%s)
+          make -j$(nproc)
+          end_time=$(date +%s)
+          echo "::endgroup::"
+          echo "duration=$((end_time-start_time))" >> $GITHUB_OUTPUT
+
+      - name: Run tests
+        id: tests
+        run: |
+          echo "::group::Tests"
+          start_time=$(date +%s)
+          make -j$(nproc) check || true
+          end_time=$(date +%s)
+          echo "::endgroup::"
+          echo "duration=$((end_time-start_time))" >> $GITHUB_OUTPUT
 
       - name: Create directory for artifacts
         run: mkdir -p dist
@@ -44,6 +91,13 @@ jobs:
         run: |
           cp src/sbsign dist/sbsign-${{ matrix.platform }}
           strip dist/sbsign-${{ matrix.platform }}
+
+      - name: Generate binary info
+        run: |
+          echo "::group::Binary Info"
+          file dist/sbsign-${{ matrix.platform }}
+          ls -lh dist/sbsign-${{ matrix.platform }}
+          echo "::endgroup::"
 
       - name: Package binary
         run: |
@@ -65,12 +119,48 @@ jobs:
           echo "VERSION=${VERSION}" >> $GITHUB_ENV
           echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
 
+      - name: Build Summary
+        run: |
+          echo "## 📊 Build Summary for ${{ matrix.display-name }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Stage | Duration |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|----------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Dependencies | ${{ steps.deps.outputs.duration }}s |" >> $GITHUB_STEP_SUMMARY
+          echo "| Configure | ${{ steps.configure.outputs.duration }}s |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build | ${{ steps.build.outputs.duration }}s |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tests | ${{ steps.tests.outputs.duration }}s |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Total** | $((${{ steps.deps.outputs.duration }} + ${{ steps.configure.outputs.duration }} + ${{ steps.build.outputs.duration }} + ${{ steps.tests.outputs.duration }}))s |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Artifact Details" >> $GITHUB_STEP_SUMMARY
+          echo "Binary size: $(ls -lh dist/sbsign-${{ matrix.platform }} | awk '{print $5}')" >> $GITHUB_STEP_SUMMARY
+
   release:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
+      - name: Checkout code for release notes
+        uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # pin@v3
+        with:
+          fetch-depth: 0
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -z "$PREVIOUS_TAG" ]; then
+            CHANGELOG=$(git log --pretty=format:"* %s (%an)" ${{ github.ref_name }})
+          else
+            CHANGELOG=$(git log --pretty=format:"* %s (%an)" $PREVIOUS_TAG..${{ github.ref_name }})
+          fi
+          CHANGELOG="${CHANGELOG//'%'/'%25'}"
+          CHANGELOG="${CHANGELOG//$'\n'/'%0A'}"
+          CHANGELOG="${CHANGELOG//$'\r'/'%0D'}"
+          echo "changelog=$CHANGELOG" >> $GITHUB_OUTPUT
+
       - name: Download all artifacts
         uses: actions/download-artifact@9bc31d5ccc31df68ecc42ccf4149144866c47d8a # pin@v3
         with:
@@ -81,12 +171,70 @@ jobs:
           mkdir -p release
           find artifacts -name "*.tar.gz" -exec cp {} release/ \;
 
+          # Generate checksums
+          cd release
+          sha256sum *.tar.gz > checksums.txt
+          cd ..
+
       - name: Upload binaries to release
         uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # pin@v1
         with:
           files: |
             release/sbsign-amd64.tar.gz
             release/sbsign-arm64.tar.gz
-          generate_release_notes: true
+            release/checksums.txt
+          body: |
+            ## sbsign release ${{ github.ref_name }}
+
+            ### What's Changed
+            ${{ steps.changelog.outputs.changelog }}
+
+            ### SHA256 Checksums
+            ```
+            $(cat release/checksums.txt)
+            ```
+
+            ### Supported Platforms
+            - x86_64/amd64
+            - ARM64/aarch64
+          generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release Summary
+        run: |
+          echo "## 🚀 Release Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Version: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "- sbsign-amd64.tar.gz" >> $GITHUB_STEP_SUMMARY
+          echo "- sbsign-arm64.tar.gz" >> $GITHUB_STEP_SUMMARY
+          echo "- checksums.txt" >> $GITHUB_STEP_SUMMARY
+
+  notify:
+    needs: [ build, release ]
+    if: always() && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify success
+        if: ${{ needs.build.result == 'success' && (needs.release.result == 'success' || needs.release.result == 'skipped') }}
+        uses: rtCamp/action-slack-notify@c33737706dea87cd7784c687dadc9adf1be59990 # pin@v2
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+          SLACK_CHANNEL: build-notifications
+          SLACK_COLOR: good
+          SLACK_TITLE: "✅ sbsign build succeeded"
+          SLACK_MESSAGE: "Build for ${{ github.ref_name }} completed successfully!"
+          SLACK_FOOTER: "Powered by GitHub Actions"
+
+      - name: Notify failure
+        if: ${{ needs.build.result == 'failure' || needs.release.result == 'failure' }}
+        uses: rtCamp/action-slack-notify@c33737706dea87cd7784c687dadc9adf1be59990 # pin@v2
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+          SLACK_CHANNEL: build-notifications
+          SLACK_COLOR: danger
+          SLACK_TITLE: "❌ sbsign build failed"
+          SLACK_MESSAGE: "Build for ${{ github.ref_name }} failed. Check the logs for details."
+          SLACK_FOOTER: "Powered by GitHub Actions"
