@@ -59,7 +59,7 @@ jobs:
           tar -czvf sbsign-${{ matrix.platform }}.tar.gz sbsign-${{ matrix.platform }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5 # pin@v3
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # pin@v4
         with:
           name: sbsign-${{ matrix.platform }}
           path: dist/sbsign-${{ matrix.platform }}.tar.gz
