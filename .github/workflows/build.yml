@@ -211,30 +211,3 @@ jobs:
           echo "- sbsign-amd64.tar.gz" >> $GITHUB_STEP_SUMMARY
           echo "- sbsign-arm64.tar.gz" >> $GITHUB_STEP_SUMMARY
           echo "- checksums.txt" >> $GITHUB_STEP_SUMMARY
-
-  notify:
-    needs: [ build, release ]
-    if: always() && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Notify success
-        if: ${{ needs.build.result == 'success' && (needs.release.result == 'success' || needs.release.result == 'skipped') }}
-        uses: rtCamp/action-slack-notify@c33737706dea87cd7784c687dadc9adf1be59990 # pin@v2
-        env:
-          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
-          SLACK_CHANNEL: build-notifications
-          SLACK_COLOR: good
-          SLACK_TITLE: "✅ sbsign build succeeded"
-          SLACK_MESSAGE: "Build for ${{ github.ref_name }} completed successfully!"
-          SLACK_FOOTER: "Powered by GitHub Actions"
-
-      - name: Notify failure
-        if: ${{ needs.build.result == 'failure' || needs.release.result == 'failure' }}
-        uses: rtCamp/action-slack-notify@c33737706dea87cd7784c687dadc9adf1be59990 # pin@v2
-        env:
-          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
-          SLACK_CHANNEL: build-notifications
-          SLACK_COLOR: danger
-          SLACK_TITLE: "❌ sbsign build failed"
-          SLACK_MESSAGE: "Build for ${{ github.ref_name }} failed. Check the logs for details."
-          SLACK_FOOTER: "Powered by GitHub Actions"
